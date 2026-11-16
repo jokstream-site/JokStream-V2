@@ -16,6 +16,21 @@ const MAX_BUFFER = Math.max(256 * 1024, Number(process.env.STREAM_MAX_BUFFER_BYT
 const HLS_MAX_BYTES = Math.max(4 * 1024 * 1024, Number(process.env.HLS_CACHE_MAX_BYTES || 64 * 1024 * 1024));
 const HLS_TTL = Math.max(1000, Number(process.env.HLS_CACHE_TTL_MS || 30000));
 
+const IPTV_HEADERS = Object.freeze({
+  'User-Agent': process.env.IPTV_USER_AGENT || 'SmartIPTVPro/1.0',
+  'Accept': '*/*',
+  'Accept-Language': 'en-US,en;q=0.9'
+});
+
+function providerFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: { ...IPTV_HEADERS, ...(options.headers || {}) },
+    // Node's fetch follows standard HTTP redirects automatically (up to its redirect limit).
+    redirect: options.redirect || 'follow'
+  });
+}
+
 const sessions = new Map();
 const hlsCache = new Map();
 let hlsCacheBytes = 0;
@@ -51,7 +66,7 @@ function xtreamUrl(action, extra = {}) {
 async function providerJson(action, extra) {
   const c = providerConfig();
   if (!c.base || !c.username || !c.password) throw new Error('IPTV provider is not configured');
-  const r = await fetch(xtreamUrl(action, extra), { signal: AbortSignal.timeout(20000) });
+  const r = await providerFetch(xtreamUrl(action, extra), { signal: AbortSignal.timeout(20000) });
   if (!r.ok) throw new Error('IPTV provider returned HTTP ' + r.status);
   return r.json();
 }
@@ -105,20 +120,26 @@ function attachClient(key, s, res) {
   res.on('close', () => detachClient(key, s, res));
   res.on('error', () => detachClient(key, s, res));
 }
-function startTsSession(key, sourceUrl) {
+function startTsSession(key, sourceUrl, redirectCount = 0) {
   const s = { clients: new Set(), upstream: null, response: null, idleTimer: null, closed: false };
   sessions.set(key, s);
   const parsed = new URL(sourceUrl);
   const transport = parsed.protocol === 'https:' ? https : http;
-  const req = transport.get(parsed, { headers: { 'User-Agent': 'JokStream/2.0', Accept: '*/*' }, timeout: 20000 }, upstreamRes => {
+  const req = transport.get(parsed, { headers: { ...IPTV_HEADERS }, timeout: 20000 }, upstreamRes => {
     if (s.closed) return upstreamRes.destroy();
     if ([301,302,303,307,308].includes(upstreamRes.statusCode) && upstreamRes.headers.location) {
       const next = new URL(upstreamRes.headers.location, parsed).toString();
       upstreamRes.resume();
+      if (redirectCount >= 5) return closeSession(key, s, 'redirect limit exceeded');
       if (!safeProviderUrl(next)) return closeSession(key, s, 'redirect host rejected');
+      const clients = [...s.clients];
+      s.clients.clear();
+      if (s.idleTimer) clearTimeout(s.idleTimer);
       sessions.delete(key);
       s.closed = true;
-      return startTsSession(key, next);
+      const redirected = startTsSession(key, next, redirectCount + 1);
+      for (const client of clients) attachClient(key, redirected, client);
+      return;
     }
     if (upstreamRes.statusCode !== 200) {
       upstreamRes.resume();
@@ -177,12 +198,7 @@ async function fetchHlsResource(url) {
   if (inFlight.has(key)) return inFlight.get(key);
   const promise = (async () => {
     if (!safeProviderUrl(url)) throw new Error('Provider host rejected');
-    const r = await fetch(url, { headers: { 'User-Agent': 'JokStream/2.0' }, signal: AbortSignal.timeout(20000), redirect: 'manual' });
-    if ([301,302,303,307,308].includes(r.status) && r.headers.get('location')) {
-      const next = new URL(r.headers.get('location'), url).toString();
-      if (!safeProviderUrl(next)) throw new Error('Redirect host rejected');
-      return fetchHlsResource(next);
-    }
+    const r = await providerFetch(url, { signal: AbortSignal.timeout(20000) });
     if (!r.ok) throw new Error('Provider HTTP ' + r.status);
     const type = r.headers.get('content-type') || 'application/octet-stream';
     const body = Buffer.from(await r.arrayBuffer());
@@ -237,7 +253,7 @@ async function loadM3UItems() {
   if (!c.m3u) throw new Error('M3U_URL is not configured');
   const u = new URL(c.m3u);
   if (!['http:','https:'].includes(u.protocol)) throw new Error('Invalid M3U URL');
-  const r = await fetch(u, { signal: AbortSignal.timeout(30000) });
+  const r = await providerFetch(u, { signal: AbortSignal.timeout(30000) });
   if (!r.ok) throw new Error('M3U fetch failed');
   const text = await r.text();
   const items = [];
