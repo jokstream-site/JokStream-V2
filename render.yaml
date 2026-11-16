@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: jokstream-v2
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: IPTV_PROVIDER
+        value: xtream
+      - key: XTREAM_BASE_URL
+        sync: false
+      - key: XTREAM_USERNAME
+        sync: false
+      - key: XTREAM_PASSWORD
+        sync: false
+      - key: TMDB_API_KEY
+        sync: false
+      - key: STREAM_IDLE_CLOSE_MS
+        value: "10000"
